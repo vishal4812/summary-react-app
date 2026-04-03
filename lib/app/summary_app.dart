@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../models/app_settings.dart';
@@ -76,9 +77,13 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
   int _selectedIndex = 0;
   bool _isBootstrapping = true;
   bool _isProcessing = false;
+  bool _isSyncingBackend = false;
+  bool _isImportingAudio = false;
+  bool _backendReachable = false;
   String _selectedLanguage = 'Hindi';
   String _selectedMode = 'Short + bullets';
   String _sourceLabel = 'Demo voice note';
+  String _backendStatusLabel = 'Mock mode is active.';
   String? _errorMessage;
   SummaryResult? _currentResult;
 
@@ -109,6 +114,8 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
       _backendUrlController.text = settings.backendBaseUrl;
       _isBootstrapping = false;
     });
+
+    await _syncBackendState();
   }
 
   Future<void> _persistSettings() async {
@@ -123,6 +130,21 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
     String? seededTranscript,
     String? sourceLabel,
   }) async {
+    if (_selectedMode == 'Detailed Pro mode' && !_settings.isPro) {
+      setState(() {
+        _selectedIndex = 2;
+      });
+      _showMessage('Detailed Pro mode is only available in Pro preview.');
+      return;
+    }
+
+    if (!_settings.useMockService) {
+      final bool synced = await _syncBackendState();
+      if (!synced) {
+        return;
+      }
+    }
+
     if (!_settings.isPro && _settings.remainingFreeUses == 0) {
       setState(() {
         _selectedIndex = 2;
@@ -165,17 +187,12 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
       setState(() {
         _currentResult = result;
         _history = <HistoryItem>[item, ..._history].take(20).toList();
-        if (!_settings.isPro && _settings.remainingFreeUses > 0) {
-          _settings = _settings.copyWith(
-            remainingFreeUses: _settings.remainingFreeUses - 1,
-          );
-        }
         _isProcessing = false;
         _selectedIndex = 0;
       });
 
       await _persistHistory();
-      await _persistSettings();
+      await _consumeUsageAfterSummary();
     } on SummaryServiceException catch (error) {
       setState(() {
         _isProcessing = false;
@@ -188,6 +205,249 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
         _errorMessage = 'Something went wrong while generating the summary.';
       });
       _showMessage('Something went wrong while generating the summary.');
+    }
+  }
+
+  Future<bool> _syncBackendState({bool showMessage = false}) async {
+    if (_settings.useMockService || _settings.backendBaseUrl.trim().isEmpty) {
+      if (!mounted) {
+        return true;
+      }
+
+      setState(() {
+        _backendReachable = false;
+        _backendStatusLabel = _settings.useMockService
+            ? 'Mock mode is active.'
+            : 'Add a backend URL to enable backend mode.';
+      });
+      return true;
+    }
+
+    setState(() {
+      _isSyncingBackend = true;
+      _errorMessage = null;
+    });
+
+    bool isHealthy = await _summaryService.checkBackendHealth(_settings);
+    if (!isHealthy) {
+      final String? fallbackUrl = _localBackendFallback(
+        _settings.backendBaseUrl,
+      );
+      if (fallbackUrl != null) {
+        final AppSettings fallbackSettings = _settings.copyWith(
+          backendBaseUrl: fallbackUrl,
+        );
+        final bool fallbackHealthy = await _summaryService.checkBackendHealth(
+          fallbackSettings,
+        );
+        if (fallbackHealthy) {
+          if (!mounted) {
+            return false;
+          }
+          setState(() {
+            _settings = fallbackSettings;
+            _backendUrlController.text = fallbackUrl;
+          });
+          await _persistSettings();
+          isHealthy = true;
+        }
+      }
+    }
+    if (!mounted) {
+      return false;
+    }
+
+    if (!isHealthy) {
+      setState(() {
+        _isSyncingBackend = false;
+        _backendReachable = false;
+        _backendStatusLabel = 'Backend is unreachable.';
+        _errorMessage =
+            'Could not reach the backend. Check the API URL or switch mock mode back on.';
+      });
+      if (showMessage) {
+        _showMessage(_errorMessage!);
+      }
+      return false;
+    }
+
+    try {
+      UsageSnapshot? snapshot;
+      if (!_settings.isPro) {
+        snapshot = await _summaryService.checkUsage(_settings);
+      }
+
+      if (!mounted) {
+        return false;
+      }
+
+      setState(() {
+        _backendReachable = true;
+        _backendStatusLabel = snapshot == null
+            ? 'Backend connected. Pro preview skips free usage checks.'
+            : 'Backend connected. ${snapshot.remainingFreeUses} free summaries remaining.';
+        if (snapshot != null) {
+          _settings = _settings.copyWith(
+            remainingFreeUses: snapshot.remainingFreeUses,
+          );
+        }
+        _isSyncingBackend = false;
+      });
+      await _persistSettings();
+      if (showMessage) {
+        _showMessage('Backend connection verified.');
+      }
+      return true;
+    } on SummaryServiceException catch (error) {
+      setState(() {
+        _isSyncingBackend = false;
+        _backendReachable = false;
+        _backendStatusLabel = 'Backend usage sync failed.';
+        _errorMessage = error.message;
+      });
+      if (showMessage) {
+        _showMessage(error.message);
+      }
+      return false;
+    }
+  }
+
+  String? _localBackendFallback(String currentUrl) {
+    final Uri? uri = Uri.tryParse(currentUrl.trim());
+    if (uri == null) {
+      return null;
+    }
+
+    final bool isLocalHost =
+        uri.host == '127.0.0.1' || uri.host == 'localhost';
+    if (!isLocalHost || uri.port != 8000) {
+      return null;
+    }
+
+    return uri.replace(port: 8010).toString();
+  }
+
+  Future<void> _consumeUsageAfterSummary() async {
+    if (_settings.isPro) {
+      await _persistSettings();
+      return;
+    }
+
+    if (_settings.useMockService || !_backendReachable) {
+      if (_settings.remainingFreeUses > 0) {
+        setState(() {
+          _settings = _settings.copyWith(
+            remainingFreeUses: _settings.remainingFreeUses - 1,
+          );
+        });
+      }
+      await _persistSettings();
+      return;
+    }
+
+    try {
+      final UsageSnapshot snapshot = await _summaryService.incrementUsage(
+        _settings,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settings = _settings.copyWith(
+          remainingFreeUses: snapshot.remainingFreeUses,
+        );
+        _backendStatusLabel =
+            'Backend connected. ${snapshot.remainingFreeUses} free summaries remaining.';
+      });
+      await _persistSettings();
+    } on SummaryServiceException catch (error) {
+      _showMessage(error.message);
+    }
+  }
+
+  Future<void> _importAudioFile() async {
+    if (_isImportingAudio || _isProcessing) {
+      return;
+    }
+
+    if (_settings.useMockService) {
+      _showMessage(
+        'Audio import requires backend mode. Save a backend URL and keep mock mode off.',
+      );
+      setState(() {
+        _selectedIndex = 2;
+      });
+      return;
+    }
+
+    final bool synced = await _syncBackendState();
+    if (!synced) {
+      setState(() {
+        _selectedIndex = 2;
+      });
+      return;
+    }
+
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowMultiple: false,
+        withData: true,
+        allowedExtensions: <String>['aac', 'm4a', 'mp3', 'wav', 'ogg', 'webm'],
+      );
+    } catch (_) {
+      _showMessage('Could not open the file picker on this platform.');
+      return;
+    }
+
+    if (result == null || result.files.isEmpty) {
+      return;
+    }
+
+    final PlatformFile file = result.files.single;
+    final Uint8List? bytes = file.bytes;
+    if (bytes == null || bytes.isEmpty) {
+      _showMessage('The selected file could not be read.');
+      return;
+    }
+
+    setState(() {
+      _isImportingAudio = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final TranscriptionResult transcription = await _summaryService
+          .transcribeAudio(
+            filename: file.name,
+            bytes: bytes,
+            language: _selectedLanguage,
+            settings: _settings,
+          );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _sourceLabel = 'Imported audio: ${transcription.filename}';
+        _transcriptController.text = transcription.transcript;
+        _isImportingAudio = false;
+      });
+      _showMessage(transcription.message);
+    } on SummaryServiceException catch (error) {
+      setState(() {
+        _isImportingAudio = false;
+        _errorMessage = error.message;
+      });
+      _showMessage(error.message);
+    } catch (_) {
+      setState(() {
+        _isImportingAudio = false;
+        _errorMessage = 'Something went wrong while importing the audio file.';
+      });
+      _showMessage('Something went wrong while importing the audio file.');
     }
   }
 
@@ -214,8 +474,12 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
     }
 
     final String payload = _buildShareText(result);
-    await Clipboard.setData(ClipboardData(text: payload));
-    _showMessage('Summary copied to clipboard.');
+    try {
+      await Clipboard.setData(ClipboardData(text: payload));
+      _showMessage('Summary copied to clipboard.');
+    } catch (_) {
+      _showMessage('Could not copy the summary on this platform.');
+    }
   }
 
   Future<void> _shareSummary() async {
@@ -224,9 +488,16 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
       return;
     }
 
-    await SharePlus.instance.share(
-      ShareParams(text: _buildShareText(result), subject: 'Voice note summary'),
-    );
+    try {
+      await SharePlus.instance.share(
+        ShareParams(
+          text: _buildShareText(result),
+          subject: 'Voice note summary',
+        ),
+      );
+    } catch (_) {
+      _showMessage('Sharing is not available here. Try copy instead.');
+    }
   }
 
   String _buildShareText(SummaryResult result) {
@@ -243,7 +514,8 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
     }
 
     buffer.writeln('Source: ${result.sourceLabel}');
-    buffer.writeln('Mode: ${result.serviceLabel}');
+    buffer.writeln('Summary mode: ${result.requestedMode}');
+    buffer.writeln('Service: ${result.serviceLabel}');
     return buffer.toString().trim();
   }
 
@@ -254,7 +526,32 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
       );
     });
     await _persistSettings();
-    _showMessage('Settings saved.');
+    await _syncBackendState(showMessage: true);
+  }
+
+  Future<void> _resetLocalIdentity() async {
+    final AppSettings refreshed = _settings.copyWith(
+      deviceId: _storage.createDeviceId(),
+      remainingFreeUses: AppSettings.defaults().remainingFreeUses,
+    );
+
+    setState(() {
+      _settings = refreshed;
+      _backendReachable = false;
+      _backendStatusLabel = _settings.useMockService
+          ? 'Mock mode is active.'
+          : 'Local identity reset. Rechecking backend usage...';
+      _errorMessage = null;
+    });
+
+    await _persistSettings();
+
+    if (_settings.useMockService) {
+      _showMessage('Local app identity reset. Free usage is fresh again.');
+      return;
+    }
+
+    await _syncBackendState(showMessage: true);
   }
 
   Future<void> _resetHistory() async {
@@ -363,6 +660,16 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
                     : 'Backend mode is enabled. The app will call `${_settings.backendBaseUrl}/summarize` for real summaries.',
                 style: Theme.of(context).textTheme.bodyLarge,
               ),
+              const SizedBox(height: 10),
+              Text(
+                _backendStatusLabel,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: _settings.useMockService || _backendReachable
+                      ? const Color(0xFF0E5E6F)
+                      : const Color(0xFF9A3412),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
               if (_errorMessage != null) ...<Widget>[
                 const SizedBox(height: 12),
                 Text(
@@ -373,6 +680,12 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
                 ),
               ],
               const SizedBox(height: 16),
+              if (_isSyncingBackend)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 14),
+                  child: LinearProgressIndicator(),
+                ),
+              const SizedBox(height: 2),
               Wrap(
                 spacing: 10,
                 runSpacing: 10,
@@ -384,8 +697,10 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
                   ),
                   _QuickActionChip(
                     icon: Icons.audio_file_rounded,
-                    label: 'Import demo file',
-                    onTap: () => _loadDemoTranscript('Imported voice note'),
+                    label: _isImportingAudio
+                        ? 'Importing audio...'
+                        : 'Import audio file',
+                    onTap: _isImportingAudio ? () {} : _importAudioFile,
                   ),
                   _QuickActionChip(
                     icon: Icons.description_rounded,
@@ -485,7 +800,9 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
-                  onPressed: _isProcessing ? null : () => _summarize(),
+                  onPressed: (_isProcessing || _isImportingAudio)
+                      ? null
+                      : () => _summarize(),
                   icon: _isProcessing
                       ? const SizedBox(
                           width: 16,
@@ -494,7 +811,11 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
                         )
                       : const Icon(Icons.auto_awesome_rounded),
                   label: Text(
-                    _isProcessing ? 'Processing…' : 'Generate summary',
+                    _isImportingAudio
+                        ? 'Importing audio…'
+                        : _isProcessing
+                        ? 'Processing…'
+                        : 'Generate summary',
                   ),
                   style: FilledButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 18),
@@ -536,25 +857,32 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          if (_selectedMode != 'Short only')
+          if (result.requestedMode != 'Short only')
             _SurfacePanel(
               title: 'Bullet points',
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: result.bulletPoints
-                    .map(
-                      (String point) => Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Text(
-                          '• $point',
-                          style: Theme.of(context).textTheme.bodyLarge,
+                children: result.bulletPoints.isEmpty
+                    ? <Widget>[
+                        Text(
+                          'No bullet points were returned for this summary.',
+                          style: Theme.of(context).textTheme.bodyMedium,
                         ),
-                      ),
-                    )
-                    .toList(),
+                      ]
+                    : result.bulletPoints
+                          .map(
+                            (String point) => Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: Text(
+                                '• $point',
+                                style: Theme.of(context).textTheme.bodyLarge,
+                              ),
+                            ),
+                          )
+                          .toList(),
               ),
             ),
-          if (_selectedMode == 'Detailed Pro mode') ...<Widget>[
+          if (result.requestedMode == 'Detailed Pro mode') ...<Widget>[
             const SizedBox(height: 12),
             _SurfacePanel(
               title: 'Detailed summary',
@@ -696,8 +1024,18 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
                 onChanged: (bool value) async {
                   setState(() {
                     _settings = _settings.copyWith(useMockService: value);
+                    _backendStatusLabel = value
+                        ? 'Mock mode is active.'
+                        : _backendStatusLabel;
+                    if (value) {
+                      _backendReachable = false;
+                      _errorMessage = null;
+                    }
                   });
                   await _persistSettings();
+                  if (!value) {
+                    await _syncBackendState(showMessage: true);
+                  }
                 },
               ),
               const SizedBox(height: 8),
@@ -722,6 +1060,14 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
                   child: const Text('Save settings'),
                 ),
               ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _isSyncingBackend
+                    ? null
+                    : () => _syncBackendState(showMessage: true),
+                icon: const Icon(Icons.sync_rounded),
+                label: const Text('Test backend connection'),
+              ),
             ],
           ),
         ),
@@ -730,6 +1076,27 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
+              Text(
+                'Usage tracking',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Usage is currently tracked per local device/browser, not per signed-in account.',
+                style: Theme.of(context).textTheme.bodyLarge,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Device ID: ${_preview(_settings.deviceId, 28)}',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _resetLocalIdentity,
+                icon: const Icon(Icons.person_outline_rounded),
+                label: const Text('Reset local app identity'),
+              ),
+              const SizedBox(height: 18),
               Text(
                 'Plan preview',
                 style: Theme.of(context).textTheme.titleLarge,
@@ -746,13 +1113,15 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
                   setState(() {
                     _settings = _settings.copyWith(
                       isPro: value,
-                      remainingFreeUses:
-                          value && _settings.remainingFreeUses < 2
+                      remainingFreeUses: value
                           ? 2
                           : _settings.remainingFreeUses,
                     );
                   });
                   await _persistSettings();
+                  if (!value && !_settings.useMockService) {
+                    await _syncBackendState();
+                  }
                 },
               ),
               const SizedBox(height: 8),
@@ -763,11 +1132,33 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
               const SizedBox(height: 12),
               OutlinedButton.icon(
                 onPressed: () async {
-                  setState(() {
-                    _settings = _settings.copyWith(remainingFreeUses: 2);
-                  });
-                  await _persistSettings();
-                  _showMessage('Free usage counter reset.');
+                  if (_settings.useMockService || !_backendReachable) {
+                    setState(() {
+                      _settings = _settings.copyWith(remainingFreeUses: 2);
+                    });
+                    await _persistSettings();
+                    _showMessage('Free usage counter reset.');
+                    return;
+                  }
+
+                  try {
+                    final UsageSnapshot snapshot = await _summaryService
+                        .resetUsage(_settings);
+                    if (!mounted) {
+                      return;
+                    }
+                    setState(() {
+                      _settings = _settings.copyWith(
+                        remainingFreeUses: snapshot.remainingFreeUses,
+                      );
+                      _backendStatusLabel =
+                          'Backend connected. ${snapshot.remainingFreeUses} free summaries remaining.';
+                    });
+                    await _persistSettings();
+                    _showMessage('Free usage counter reset.');
+                  } on SummaryServiceException catch (error) {
+                    _showMessage(error.message);
+                  }
                 },
                 icon: const Icon(Icons.refresh_rounded),
                 label: const Text('Reset free usage'),

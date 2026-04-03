@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -11,10 +12,147 @@ class SummaryServiceException implements Exception {
   final String message;
 }
 
+class UsageSnapshot {
+  const UsageSnapshot({
+    required this.remainingFreeUses,
+    required this.used,
+    required this.limit,
+    required this.isPro,
+  });
+
+  final int remainingFreeUses;
+  final int used;
+  final int limit;
+  final bool isPro;
+}
+
+class TranscriptionResult {
+  const TranscriptionResult({
+    required this.filename,
+    required this.transcript,
+    required this.message,
+    required this.status,
+    required this.language,
+  });
+
+  final String filename;
+  final String transcript;
+  final String message;
+  final String status;
+  final String? language;
+}
+
 class SummaryService {
   SummaryService({http.Client? client}) : _client = client ?? http.Client();
 
   final http.Client _client;
+
+  Future<bool> checkBackendHealth(AppSettings settings) async {
+    if (settings.useMockService || settings.backendBaseUrl.trim().isEmpty) {
+      return false;
+    }
+
+    final Uri uri = Uri.parse(
+      settings.backendBaseUrl.trim(),
+    ).resolve('/health');
+    try {
+      final http.Response response = await _client.get(uri);
+      return response.statusCode >= 200 && response.statusCode < 300;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<UsageSnapshot> checkUsage(AppSettings settings) {
+    return _postUsageSnapshot(
+      settings: settings,
+      endpoint: '/usage/check',
+      errorMessage:
+          'Could not read usage from the backend. Check the API URL or switch mock mode back on.',
+    );
+  }
+
+  Future<UsageSnapshot> incrementUsage(AppSettings settings) {
+    return _postUsageSnapshot(
+      settings: settings,
+      endpoint: '/usage/increment',
+      errorMessage:
+          'Summary completed, but usage could not be updated on the backend.',
+    );
+  }
+
+  Future<UsageSnapshot> resetUsage(AppSettings settings) {
+    return _postUsageSnapshot(
+      settings: settings,
+      endpoint: '/usage/reset',
+      errorMessage:
+          'Could not reset usage on the backend. Check the API URL and try again.',
+    );
+  }
+
+  Future<TranscriptionResult> transcribeAudio({
+    required String filename,
+    required Uint8List bytes,
+    required String language,
+    required AppSettings settings,
+  }) async {
+    if (settings.useMockService || settings.backendBaseUrl.trim().isEmpty) {
+      throw const SummaryServiceException(
+        'Audio import requires backend mode. Save a backend URL and keep mock mode off.',
+      );
+    }
+
+    final Uri uri = Uri.parse(
+      settings.backendBaseUrl.trim(),
+    ).resolve('/transcribe');
+    final http.MultipartRequest request = http.MultipartRequest('POST', uri)
+      ..fields['language'] = language
+      ..files.add(
+        http.MultipartFile.fromBytes('file', bytes, filename: filename),
+      );
+
+    http.StreamedResponse streamedResponse;
+    try {
+      streamedResponse = await request.send();
+    } catch (_) {
+      throw const SummaryServiceException(
+        'Could not upload the audio file. Check the backend URL and try again.',
+      );
+    }
+
+    final http.Response response = await http.Response.fromStream(
+      streamedResponse,
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw SummaryServiceException(
+        'Backend responded with ${response.statusCode}. Expected a working `/transcribe` endpoint.',
+      );
+    }
+
+    try {
+      final Map<String, dynamic> payload =
+          jsonDecode(response.body) as Map<String, dynamic>;
+      final String transcript = (payload['transcript'] as String?) ?? '';
+      if (transcript.trim().isEmpty) {
+        throw const FormatException('Missing transcript');
+      }
+
+      return TranscriptionResult(
+        filename: (payload['filename'] as String?) ?? filename,
+        transcript: transcript,
+        message:
+            (payload['message'] as String?) ??
+            'Audio upload completed successfully.',
+        status: (payload['status'] as String?) ?? 'ok',
+        language: payload['language'] as String?,
+      );
+    } catch (_) {
+      throw const SummaryServiceException(
+        'The backend response shape is invalid. Expected `transcript` from `/transcribe`.',
+      );
+    }
+  }
 
   Future<SummaryResult> summarize({
     required String transcript,
@@ -85,6 +223,7 @@ class SummaryService {
         shortSummary: shortSummary,
         bulletPoints: bulletPoints,
         detailedSummary: detailedSummary,
+        requestedMode: mode,
         language: language,
         sourceLabel: sourceLabel,
         serviceLabel: 'Backend',
@@ -145,11 +284,57 @@ class SummaryService {
       shortSummary: shortSummary,
       bulletPoints: bulletPoints,
       detailedSummary: detailedSummary,
+      requestedMode: mode,
       language: language,
       sourceLabel: sourceLabel,
       serviceLabel: 'Mock',
       createdAt: DateTime.now(),
     );
+  }
+
+  Future<UsageSnapshot> _postUsageSnapshot({
+    required AppSettings settings,
+    required String endpoint,
+    required String errorMessage,
+  }) async {
+    final String deviceId = settings.deviceId.trim();
+    if (deviceId.isEmpty) {
+      throw const SummaryServiceException(
+        'Device identity is missing. Restart the app and try again.',
+      );
+    }
+
+    final Uri uri = Uri.parse(settings.backendBaseUrl.trim()).resolve(endpoint);
+    final http.Response response;
+
+    try {
+      response = await _client.post(
+        uri,
+        headers: const <String, String>{'Content-Type': 'application/json'},
+        body: jsonEncode(<String, dynamic>{'deviceId': deviceId}),
+      );
+    } catch (_) {
+      throw SummaryServiceException(errorMessage);
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw SummaryServiceException(errorMessage);
+    }
+
+    try {
+      final Map<String, dynamic> payload =
+          jsonDecode(response.body) as Map<String, dynamic>;
+      return UsageSnapshot(
+        remainingFreeUses: (payload['remainingFreeUses'] as num?)?.toInt() ?? 0,
+        used: (payload['used'] as num?)?.toInt() ?? 0,
+        limit: (payload['limit'] as num?)?.toInt() ?? 0,
+        isPro: (payload['isPro'] as bool?) ?? false,
+      );
+    } catch (_) {
+      throw SummaryServiceException(
+        'The backend usage response shape is invalid.',
+      );
+    }
   }
 
   String _serializeMode(String mode) {
