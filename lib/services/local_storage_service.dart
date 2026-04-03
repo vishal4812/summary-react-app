@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -15,13 +16,33 @@ class LocalStorageService {
     final SharedPreferences preferences = await SharedPreferences.getInstance();
     final String? raw = preferences.getString(_settingsKey);
     if (raw == null || raw.isEmpty) {
-      return AppSettings.defaults();
+      final AppSettings defaults = AppSettings.defaults(
+        deviceId: createDeviceId(),
+      );
+      await saveSettings(defaults);
+      return defaults;
     }
 
     try {
-      return AppSettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+      final AppSettings settings = AppSettings.fromJson(
+        jsonDecode(raw) as Map<String, dynamic>,
+      );
+      if (settings.deviceId.isNotEmpty) {
+        return settings;
+      }
+
+      final AppSettings updated = settings.copyWith(
+        deviceId: createDeviceId(),
+        remainingFreeUses: AppSettings.defaults().remainingFreeUses,
+      );
+      await saveSettings(updated);
+      return updated;
     } catch (_) {
-      return AppSettings.defaults();
+      final AppSettings defaults = AppSettings.defaults(
+        deviceId: createDeviceId(),
+      );
+      await saveSettings(defaults);
+      return defaults;
     }
   }
 
@@ -63,5 +84,13 @@ class LocalStorageService {
         .map((HistoryItem item) => jsonEncode(item.toJson()))
         .toList();
     await preferences.setStringList(_historyKey, encoded);
+  }
+
+  String createDeviceId() {
+    final Random random = Random();
+    final String timestamp = DateTime.now().microsecondsSinceEpoch.toString();
+    final String suffix =
+        '${random.nextInt(1 << 30).toRadixString(16)}${random.nextInt(1 << 30).toRadixString(16)}';
+    return 'device_$timestamp$suffix';
   }
 }
