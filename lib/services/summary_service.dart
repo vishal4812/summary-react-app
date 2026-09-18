@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -111,28 +112,46 @@ class SummaryService {
         http.MultipartFile.fromBytes('file', bytes, filename: filename),
       );
 
-    http.StreamedResponse streamedResponse;
+    http.Response response;
     try {
-      streamedResponse = await request.send();
+      response = await _client
+          .send(request)
+          .then(http.Response.fromStream)
+          .timeout(const Duration(minutes: 3));
+    } on TimeoutException {
+      throw const SummaryServiceException(
+        'Transcription timed out. Try a shorter audio file.',
+      );
     } catch (_) {
       throw const SummaryServiceException(
         'Could not upload the audio file. Check the backend URL and try again.',
       );
     }
 
-    final http.Response response = await http.Response.fromStream(
-      streamedResponse,
-    );
-
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      String? detail;
+      try {
+        final dynamic payload = jsonDecode(response.body);
+        if (payload is Map<String, dynamic> && payload['detail'] is String) {
+          detail = payload['detail'] as String;
+        }
+      } catch (_) {
+        // A proxy may return a non-JSON error page.
+      }
       throw SummaryServiceException(
-        'Backend responded with ${response.statusCode}. Expected a working `/transcribe` endpoint.',
+        detail ??
+            'Audio transcription failed (${response.statusCode}). Please try again.',
       );
     }
 
     try {
       final Map<String, dynamic> payload =
           jsonDecode(response.body) as Map<String, dynamic>;
+      if (payload['status'] != 'completed' || payload['success'] == false) {
+        throw const SummaryServiceException(
+          'Real audio transcription did not complete. Check the backend transcription setup.',
+        );
+      }
       final String transcript = (payload['transcript'] as String?) ?? '';
       if (transcript.trim().isEmpty) {
         throw const FormatException('Missing transcript');
@@ -147,6 +166,8 @@ class SummaryService {
         status: (payload['status'] as String?) ?? 'ok',
         language: payload['language'] as String?,
       );
+    } on SummaryServiceException {
+      rethrow;
     } catch (_) {
       throw const SummaryServiceException(
         'The backend response shape is invalid. Expected `transcript` from `/transcribe`.',

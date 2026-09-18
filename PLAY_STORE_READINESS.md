@@ -35,7 +35,7 @@ The generated bundle should be at `build/app/outputs/bundle/release/app-release.
 
 ## Remaining Product Gaps
 
-- `/transcribe` still returns a placeholder transcript. Do not claim real voice-note transcription in the Play listing until speech-to-text is connected.
+- Gemini transcription is connected. Configure backend credentials and quotas, then evaluate real Hindi, Gujarati, and mixed-language recordings before publishing quality claims.
 - Replace the default Flutter launcher icon with a final branded icon before production.
 - Host the privacy policy at a public URL and use that URL in Play Console.
 - Complete Play Console Data Safety based on the deployed backend's real data handling.

@@ -26,6 +26,8 @@ The app is built around a simple MVP flow:
 - Real audio file picking in the app
 - Audio upload to the backend using multipart form data
 - Imported audio transcript written back into the transcript box
+- Real Gemini transcription through the Python backend, followed by automatic summary generation
+- Transcription errors shown without consuming summary usage
 - Copy and share actions from the latest result
 - Backend connection test in Settings
 - Local identity reset in Settings for development
@@ -33,7 +35,7 @@ The app is built around a simple MVP flow:
 ## What is still placeholder or dummy
 
 - `/summarize` uses a local heuristic summarizer until a production provider is connected
-- `/transcribe` returns a placeholder transcript after a real upload
+- `/transcribe` requires `GEMINI_API_KEY` on the Python backend
 - Audio recording is still not implemented
 - Payments are still represented by a Pro preview toggle
 
@@ -61,8 +63,16 @@ Then start the Flutter web app:
 ```bash
 cd /home/addweb/Learning/Pro/04-prototypes-needing-work/summary-app/summary-react-app
 flutter pub get
-flutter run -d web-server --web-hostname 127.0.0.1 --web-port 3000
+flutter run -d web-server --web-hostname 127.0.0.1 --web-port 3000 \
+  --dart-define=BACKEND_BASE_URL=http://127.0.0.1:8010
 ```
+
+Configure the backend's ignored `.env` using its `.env.example` before importing
+audio. Keep Gemini credentials on the backend. Supported audio imports are AAC,
+M4A, MP3, WAV, OGG, WebM, and FLAC, up to 20 MiB. The app accepts only completed
+transcripts and automatically generates a summary, saves history, and updates
+usage after a successful summary. A failed summary leaves the transcript available
+for retry. Free-tier Gemini quotas and data handling apply.
 
 For Android release builds, see `PLAY_STORE_READINESS.md`.
 
@@ -74,7 +84,6 @@ Open:
 ## Next implementation steps
 
 1. Replace heuristic `/summarize` with a production summarization provider
-2. Replace placeholder `/transcribe` with real speech-to-text
-3. Auto-trigger summary generation after successful transcription
-4. Add real audio recording from the app
-5. Replace Pro preview with a real purchase flow
+2. Evaluate Hindi, Gujarati, and mixed-language recordings with Gemini
+3. Add real audio recording from the app
+4. Replace Pro preview with a real purchase flow

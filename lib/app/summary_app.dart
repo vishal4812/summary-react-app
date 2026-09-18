@@ -59,7 +59,14 @@ class MyApp extends StatelessWidget {
 }
 
 class SummaryAppScreen extends StatefulWidget {
-  const SummaryAppScreen({super.key});
+  const SummaryAppScreen({
+    super.key,
+    this.summaryService,
+    this.audioFilePicker,
+  });
+
+  final SummaryService? summaryService;
+  final Future<FilePickerResult?> Function()? audioFilePicker;
 
   @override
   State<SummaryAppScreen> createState() => _SummaryAppScreenState();
@@ -69,7 +76,8 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
   final TextEditingController _transcriptController = TextEditingController();
   final TextEditingController _backendUrlController = TextEditingController();
   final LocalStorageService _storage = const LocalStorageService();
-  final SummaryService _summaryService = SummaryService();
+  late final SummaryService _summaryService =
+      widget.summaryService ?? SummaryService();
 
   AppSettings _settings = AppSettings.defaults();
   List<HistoryItem> _history = <HistoryItem>[];
@@ -130,6 +138,9 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
     String? seededTranscript,
     String? sourceLabel,
   }) async {
+    if (_isProcessing || _isImportingAudio || _isSyncingBackend) {
+      return;
+    }
     if (_selectedMode == 'Detailed Pro mode' && !_settings.isPro) {
       setState(() {
         _selectedIndex = 2;
@@ -140,7 +151,7 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
 
     if (!_settings.useMockService) {
       final bool synced = await _syncBackendState();
-      if (!synced) {
+      if (!mounted || !synced) {
         return;
       }
     }
@@ -173,6 +184,9 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
         sourceLabel: _sourceLabel,
         settings: _settings,
       );
+      if (!mounted) {
+        return;
+      }
 
       final HistoryItem item = HistoryItem(
         source: result.sourceLabel,
@@ -187,24 +201,33 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
       setState(() {
         _currentResult = result;
         _history = <HistoryItem>[item, ..._history].take(20).toList();
-        _isProcessing = false;
         _selectedIndex = 0;
       });
 
       await _persistHistory();
       await _consumeUsageAfterSummary();
     } on SummaryServiceException catch (error) {
+      if (!mounted) {
+        return;
+      }
       setState(() {
         _isProcessing = false;
         _errorMessage = error.message;
       });
       _showMessage(error.message);
     } catch (_) {
+      if (!mounted) {
+        return;
+      }
       setState(() {
         _isProcessing = false;
         _errorMessage = 'Something went wrong while generating the summary.';
       });
       _showMessage('Something went wrong while generating the summary.');
+    } finally {
+      if (mounted) {
+        setState(() => _isProcessing = false);
+      }
     }
   }
 
@@ -318,8 +341,7 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
       return null;
     }
 
-    final bool isLocalHost =
-        uri.host == '127.0.0.1' || uri.host == 'localhost';
+    final bool isLocalHost = uri.host == '127.0.0.1' || uri.host == 'localhost';
     if (!isLocalHost || uri.port != 8000) {
       return null;
     }
@@ -366,7 +388,7 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
   }
 
   Future<void> _importAudioFile() async {
-    if (_isImportingAudio || _isProcessing) {
+    if (_isImportingAudio || _isProcessing || _isSyncingBackend) {
       return;
     }
 
@@ -381,6 +403,9 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
     }
 
     final bool synced = await _syncBackendState();
+    if (!mounted) {
+      return;
+    }
     if (!synced) {
       setState(() {
         _selectedIndex = 2;
@@ -388,27 +413,10 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
       return;
     }
 
-    FilePickerResult? result;
-    try {
-      result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowMultiple: false,
-        withData: true,
-        allowedExtensions: <String>['aac', 'm4a', 'mp3', 'wav', 'ogg', 'webm'],
-      );
-    } catch (_) {
-      _showMessage('Could not open the file picker on this platform.');
-      return;
-    }
-
-    if (result == null || result.files.isEmpty) {
-      return;
-    }
-
-    final PlatformFile file = result.files.single;
-    final Uint8List? bytes = file.bytes;
-    if (bytes == null || bytes.isEmpty) {
-      _showMessage('The selected file could not be read.');
+    if ((!_settings.isPro && _settings.remainingFreeUses == 0) ||
+        (!_settings.isPro && _selectedMode == 'Detailed Pro mode')) {
+      setState(() => _selectedIndex = 2);
+      _showMessage('Check your plan before importing audio.');
       return;
     }
 
@@ -416,6 +424,55 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
       _isImportingAudio = true;
       _errorMessage = null;
     });
+
+    FilePickerResult? result;
+    try {
+      result = widget.audioFilePicker != null
+          ? await widget.audioFilePicker!()
+          : await FilePicker.platform.pickFiles(
+              type: FileType.custom,
+              allowMultiple: false,
+              withData: true,
+              allowedExtensions: <String>[
+                'aac',
+                'm4a',
+                'mp3',
+                'wav',
+                'ogg',
+                'webm',
+                'flac',
+              ],
+            );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() => _isImportingAudio = false);
+      _showMessage('Could not open the file picker on this platform.');
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    if (result == null || result.files.isEmpty) {
+      setState(() => _isImportingAudio = false);
+      return;
+    }
+
+    final PlatformFile file = result.files.single;
+    final Uint8List? bytes = file.bytes;
+    if (bytes == null || bytes.isEmpty) {
+      setState(() => _isImportingAudio = false);
+      _showMessage('The selected file could not be read.');
+      return;
+    }
+    if (bytes.length > 20 * 1024 * 1024) {
+      setState(() => _isImportingAudio = false);
+      _showMessage('Choose an audio file under 20 MB.');
+      return;
+    }
 
     try {
       final TranscriptionResult transcription = await _summaryService
@@ -436,13 +493,23 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
         _isImportingAudio = false;
       });
       _showMessage(transcription.message);
+      await _summarize(
+        seededTranscript: transcription.transcript,
+        sourceLabel: 'Imported audio: ${transcription.filename}',
+      );
     } on SummaryServiceException catch (error) {
+      if (!mounted) {
+        return;
+      }
       setState(() {
         _isImportingAudio = false;
         _errorMessage = error.message;
       });
       _showMessage(error.message);
     } catch (_) {
+      if (!mounted) {
+        return;
+      }
       setState(() {
         _isImportingAudio = false;
         _errorMessage = 'Something went wrong while importing the audio file.';
@@ -693,19 +760,29 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
                   _QuickActionChip(
                     icon: Icons.mic_rounded,
                     label: 'Record demo note',
-                    onTap: () => _loadDemoTranscript('Recorded voice note'),
+                    onTap: (_isImportingAudio || _isProcessing)
+                        ? () {}
+                        : () => _loadDemoTranscript('Recorded voice note'),
                   ),
                   _QuickActionChip(
                     icon: Icons.audio_file_rounded,
                     label: _isImportingAudio
                         ? 'Importing audio...'
                         : 'Import audio file',
-                    onTap: _isImportingAudio ? () {} : _importAudioFile,
+                    onTap:
+                        (_isImportingAudio ||
+                            _isProcessing ||
+                            _isSyncingBackend)
+                        ? () {}
+                        : _importAudioFile,
                   ),
                   _QuickActionChip(
                     icon: Icons.description_rounded,
                     label: 'Paste transcript',
                     onTap: () {
+                      if (_isImportingAudio || _isProcessing) {
+                        return;
+                      }
                       setState(() {
                         _sourceLabel = 'Pasted transcript';
                       });
@@ -738,11 +815,13 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
                   return ChoiceChip(
                     label: Text(language),
                     selected: selected,
-                    onSelected: (_) {
-                      setState(() {
-                        _selectedLanguage = language;
-                      });
-                    },
+                    onSelected: (_isImportingAudio || _isProcessing)
+                        ? null
+                        : (_) {
+                            setState(() {
+                              _selectedLanguage = language;
+                            });
+                          },
                   );
                 }).toList(),
               ),
@@ -765,17 +844,20 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
                       return ChoiceChip(
                         label: Text(mode),
                         selected: selected,
-                        onSelected: (_) {
-                          setState(() {
-                            _selectedMode = mode;
-                          });
-                        },
+                        onSelected: (_isImportingAudio || _isProcessing)
+                            ? null
+                            : (_) {
+                                setState(() {
+                                  _selectedMode = mode;
+                                });
+                              },
                       );
                     }).toList(),
               ),
               const SizedBox(height: 16),
               TextField(
                 controller: _transcriptController,
+                readOnly: _isImportingAudio || _isProcessing,
                 minLines: 5,
                 maxLines: 8,
                 decoration: InputDecoration(
@@ -800,7 +882,8 @@ class _SummaryAppScreenState extends State<SummaryAppScreen> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
-                  onPressed: (_isProcessing || _isImportingAudio)
+                  onPressed:
+                      (_isProcessing || _isImportingAudio || _isSyncingBackend)
                       ? null
                       : () => _summarize(),
                   icon: _isProcessing

@@ -20,11 +20,23 @@ User-provided text and audio are sent to the configured backend only to generate
 
 ## Data Sharing
 
-Do not publish this draft until the production backend and any speech-to-text or summarization providers are known. If third-party providers are used, list them here and explain what data is sent to them.
+The current backend sends imported audio and selected language hints to Google's
+Gemini API for speech-to-text. It disables interaction storage for transcription
+requests. Google's own retention and data handling policies still apply, and
+free-tier content may be used to improve Google's products. See
+[Gemini terms](https://ai.google.dev/gemini-api/terms).
+
+Text summaries currently use a local algorithm on the backend. Before publishing
+this policy, confirm the deployed backend and API tier, and document any additional
+providers or changes to data handling.
 
 ## Data Retention
 
-The current prototype backend stores uploaded audio files under backend runtime storage. Before production, define and implement a deletion policy for uploaded files, transcripts, summaries, and usage records.
+The current backend processes new audio uploads without saving them to its runtime
+upload directory. Files retained by older prototype versions are not automatically
+deleted. Before production, define and implement a deletion policy for legacy
+uploads and usage records, and confirm Google's retention behavior for the chosen
+API tier. History and settings remain on the user's device.
 
 ## User Controls
 
