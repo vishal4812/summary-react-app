@@ -21,14 +21,14 @@ User-provided text and audio are sent to the configured backend only to generate
 ## Data Sharing
 
 The current backend sends imported audio and selected language hints to Google's
-Gemini API for speech-to-text. It disables interaction storage for transcription
-requests. Google's own retention and data handling policies still apply, and
-free-tier content may be used to improve Google's products. See
+Gemini API for speech-to-text. It also sends submitted or transcribed text and the
+selected output language to Gemini to generate summaries. It disables interaction
+storage for both kinds of requests. Google's own retention and data handling policies
+still apply, and free-tier content may be used to improve Google's products. See
 [Gemini terms](https://ai.google.dev/gemini-api/terms).
 
-Text summaries currently use a local algorithm on the backend. Before publishing
-this policy, confirm the deployed backend and API tier, and document any additional
-providers or changes to data handling.
+Before publishing this policy, confirm the deployed backend and API tier, and
+document any additional providers or changes to data handling.
 
 ## Data Retention
 

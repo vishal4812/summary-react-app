@@ -57,7 +57,9 @@ class SummaryService {
       settings.backendBaseUrl.trim(),
     ).resolve('/health');
     try {
-      final http.Response response = await _client.get(uri);
+      final http.Response response = await _client
+          .get(uri)
+          .timeout(const Duration(seconds: 5));
       return response.statusCode >= 200 && response.statusCode < 300;
     } catch (_) {
       return false;
@@ -129,17 +131,8 @@ class SummaryService {
     }
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      String? detail;
-      try {
-        final dynamic payload = jsonDecode(response.body);
-        if (payload is Map<String, dynamic> && payload['detail'] is String) {
-          detail = payload['detail'] as String;
-        }
-      } catch (_) {
-        // A proxy may return a non-JSON error page.
-      }
       throw SummaryServiceException(
-        detail ??
+        _backendError(response) ??
             'Audio transcription failed (${response.statusCode}). Please try again.',
       );
     }
@@ -182,12 +175,18 @@ class SummaryService {
     required String sourceLabel,
     required AppSettings settings,
   }) async {
-    if (settings.useMockService || settings.backendBaseUrl.trim().isEmpty) {
+    if (settings.useMockService) {
       return _buildMockSummary(
         transcript: transcript,
         language: language,
         mode: mode,
         sourceLabel: sourceLabel,
+      );
+    }
+
+    if (settings.backendBaseUrl.trim().isEmpty) {
+      throw const SummaryServiceException(
+        'Set a backend URL in Settings to generate a summary.',
       );
     }
 
@@ -197,14 +196,20 @@ class SummaryService {
     http.Response response;
 
     try {
-      response = await _client.post(
-        uri,
-        headers: const <String, String>{'Content-Type': 'application/json'},
-        body: jsonEncode(<String, dynamic>{
-          'text': transcript,
-          'language': language,
-          'mode': _serializeMode(mode),
-        }),
+      response = await _client
+          .post(
+            uri,
+            headers: const <String, String>{'Content-Type': 'application/json'},
+            body: jsonEncode(<String, dynamic>{
+              'text': transcript,
+              'language': language,
+              'mode': _serializeMode(mode),
+            }),
+          )
+          .timeout(const Duration(minutes: 2));
+    } on TimeoutException {
+      throw const SummaryServiceException(
+        'Summary generation timed out. Please try again.',
       );
     } catch (_) {
       throw const SummaryServiceException(
@@ -214,7 +219,8 @@ class SummaryService {
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw SummaryServiceException(
-        'Backend responded with ${response.statusCode}. Expected a working `/summarize` endpoint.',
+        _backendError(response) ??
+            'Summary generation failed (${response.statusCode}). Please try again.',
       );
     }
 
@@ -222,22 +228,22 @@ class SummaryService {
       final Map<String, dynamic> payload =
           jsonDecode(response.body) as Map<String, dynamic>;
 
-      final String shortSummary =
-          (payload['summary'] as String?) ??
-          (payload['shortSummary'] as String?) ??
-          '';
-      if (shortSummary.isEmpty) {
-        throw const FormatException('Missing summary');
+      if (payload['success'] == false) {
+        throw const FormatException('Summary was unsuccessful');
       }
-
+      final String shortSummary = (payload['summary'] as String).trim();
+      final String detailedSummary = (payload['detailedSummary'] as String)
+          .trim();
       final List<String> bulletPoints =
-          ((payload['bulletPoints'] as List<dynamic>?) ?? <dynamic>[])
-              .map((dynamic item) => item.toString())
+          (payload['bulletPoints'] as List<dynamic>)
+              .map((dynamic item) => (item as String).trim())
               .toList();
-
-      final String detailedSummary =
-          (payload['detailedSummary'] as String?) ??
-          _buildDetailedSummary(shortSummary, bulletPoints);
+      if (shortSummary.isEmpty ||
+          detailedSummary.isEmpty ||
+          bulletPoints.isEmpty ||
+          bulletPoints.any((String point) => point.isEmpty)) {
+        throw const FormatException('Missing summary content');
+      }
 
       return SummaryResult(
         transcript: transcript,
@@ -247,14 +253,27 @@ class SummaryService {
         requestedMode: mode,
         language: language,
         sourceLabel: sourceLabel,
-        serviceLabel: 'Backend',
+        serviceLabel: payload['serviceMode'] == 'gemini' ? 'Gemini' : 'Backend',
         createdAt: DateTime.now(),
       );
     } catch (_) {
       throw const SummaryServiceException(
-        'The backend response shape is invalid. Expected `summary` and optional `bulletPoints`.',
+        'The backend returned an invalid summary. Please try again.',
       );
     }
+  }
+
+  String? _backendError(http.Response response) {
+    try {
+      final dynamic payload = jsonDecode(response.body);
+      if (payload is Map<String, dynamic> && payload['detail'] is String) {
+        final String detail = (payload['detail'] as String).trim();
+        if (detail.isNotEmpty) return detail;
+      }
+    } catch (_) {
+      // A proxy may return a non-JSON error page.
+    }
+    return null;
   }
 
   SummaryResult _buildMockSummary({
@@ -329,11 +348,13 @@ class SummaryService {
     final http.Response response;
 
     try {
-      response = await _client.post(
-        uri,
-        headers: const <String, String>{'Content-Type': 'application/json'},
-        body: jsonEncode(<String, dynamic>{'deviceId': deviceId}),
-      );
+      response = await _client
+          .post(
+            uri,
+            headers: const <String, String>{'Content-Type': 'application/json'},
+            body: jsonEncode(<String, dynamic>{'deviceId': deviceId}),
+          )
+          .timeout(const Duration(seconds: 15));
     } catch (_) {
       throw SummaryServiceException(errorMessage);
     }
