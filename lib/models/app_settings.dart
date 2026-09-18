@@ -14,10 +14,19 @@ class AppSettings {
   final int remainingFreeUses;
 
   factory AppSettings.defaults({String deviceId = ''}) {
+    const String defaultBackendBaseUrl = String.fromEnvironment(
+      'BACKEND_BASE_URL',
+      defaultValue: 'http://127.0.0.1:8000',
+    );
+    const bool defaultUseMockService = bool.fromEnvironment(
+      'USE_MOCK_SERVICE',
+      defaultValue: false,
+    );
+
     return AppSettings(
       deviceId: deviceId,
-      backendBaseUrl: 'http://127.0.0.1:8000',
-      useMockService: false,
+      backendBaseUrl: defaultBackendBaseUrl,
+      useMockService: defaultUseMockService,
       isPro: false,
       remainingFreeUses: 2,
     );

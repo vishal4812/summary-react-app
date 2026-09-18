@@ -32,7 +32,7 @@ The app is built around a simple MVP flow:
 
 ## What is still placeholder or dummy
 
-- `/summarize` still returns a fixed dummy summary payload
+- `/summarize` uses a local heuristic summarizer until a production provider is connected
 - `/transcribe` returns a placeholder transcript after a real upload
 - Audio recording is still not implemented
 - Payments are still represented by a Pro preview toggle
@@ -49,7 +49,7 @@ The app is built around a simple MVP flow:
 Start the backend first:
 
 ```bash
-cd /home/addweb/Learning/Pro/summary-app/summary-python-backend
+cd /home/addweb/Learning/Pro/04-prototypes-needing-work/summary-app/summary-python-backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -59,10 +59,12 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8010
 Then start the Flutter web app:
 
 ```bash
-cd /home/addweb/Learning/Pro/summary-app/summary-react-app
+cd /home/addweb/Learning/Pro/04-prototypes-needing-work/summary-app/summary-react-app
 flutter pub get
 flutter run -d web-server --web-hostname 127.0.0.1 --web-port 3000
 ```
+
+For Android release builds, see `PLAY_STORE_READINESS.md`.
 
 Open:
 
@@ -71,7 +73,7 @@ Open:
 
 ## Next implementation steps
 
-1. Replace dummy `/summarize` with a real summarization provider
+1. Replace heuristic `/summarize` with a production summarization provider
 2. Replace placeholder `/transcribe` with real speech-to-text
 3. Auto-trigger summary generation after successful transcription
 4. Add real audio recording from the app
